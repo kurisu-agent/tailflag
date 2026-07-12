@@ -22,8 +22,13 @@ waybar, GNOME appindicator extension, …).
 
 ## How it works
 
-Polls `tailscale status --json` every 3 seconds. The exit node's country
-is resolved in order from:
+Event-driven: subscribes to tailscaled's IPN notification bus (LocalAPI
+`watch-ipn-bus` on the unix socket — the same mechanism the official GUI
+clients use) and re-reads `tailscale status --json` when a notification
+arrives. Between events the process sleeps in a blocking read; there are
+no periodic wake-ups. If the daemon goes away it retries the
+subscription every 5 seconds. The exit node's country is resolved in
+order from:
 
 1. `Peer.Location.CountryCode` (set for Mullvad exit nodes)
 2. `TAILFLAG_LOCATIONS` env map — `host=cc,host2=cc2`, matched on

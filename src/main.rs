@@ -13,8 +13,16 @@
 //
 // Flag PNGs are read from $TAILFLAG_FLAG_DIR/<size>/<cc>.png (sizes 24/48),
 // baked at build time from lipis/flag-icons.
+//
+// Updates are event-driven, not polled: we subscribe to tailscaled's IPN
+// notification bus (LocalAPI `watch-ipn-bus` on the unix socket, same
+// mechanism the official GUI clients use) and re-read `tailscale status`
+// only when a notification arrives. Between events the process sleeps in
+// a blocking read — no periodic wake-ups.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::time::Duration;
 
@@ -23,7 +31,8 @@ use ksni::menu::{MenuItem, StandardItem};
 use ksni::{Icon, ToolTip, Tray};
 
 const ICON_SIZES: [u32; 2] = [24, 48];
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 #[derive(Clone, Debug, PartialEq)]
 enum State {
@@ -413,11 +422,80 @@ fn main() {
         .spawn()
         .expect("failed to start SNI tray service");
 
+    // Demo mode is static — nothing to watch, just stay registered.
+    if std::env::var("TAILFLAG_DEMO").is_ok() {
+        loop {
+            std::thread::park();
+        }
+    }
+
     loop {
-        std::thread::sleep(POLL_INTERVAL);
-        let alive = handle.update(Tailflag::refresh).is_some();
-        if !alive {
+        match watch_ipn_bus() {
+            Ok(events) => {
+                eprintln!("subscribed to tailscaled IPN bus");
+                // (re)connected — resync, then block until something changes
+                if handle.update(Tailflag::refresh).is_none() {
+                    return;
+                }
+                for line in events.lines() {
+                    match line {
+                        Ok(l) if l.trim().is_empty() => {}
+                        Ok(_) => {
+                            if handle.update(Tailflag::refresh).is_none() {
+                                return;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                eprintln!("IPN bus stream ended, reconnecting");
+            }
+            Err(e) => {
+                eprintln!("IPN bus unavailable ({e}), retrying");
+                // daemon likely down — make sure the icon says so
+                if handle.update(Tailflag::refresh).is_none() {
+                    return;
+                }
+            }
+        }
+        if handle.is_closed() {
+            return;
+        }
+        std::thread::sleep(RECONNECT_DELAY);
+    }
+}
+
+/// Subscribe to tailscaled's IPN notification bus. Returns a reader that
+/// yields one JSON notification per line for as long as the daemon runs;
+/// we only use the arrival of a line as a "state may have changed" signal.
+///
+/// HTTP/1.0 keeps the response un-chunked; mask=2 (NotifyInitialState)
+/// makes the daemon confirm the subscription immediately.
+fn watch_ipn_bus() -> std::io::Result<BufReader<UnixStream>> {
+    let socket =
+        std::env::var("TAILFLAG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
+    let mut stream = UnixStream::connect(socket)?;
+    stream.write_all(
+        b"GET /localapi/v0/watch-ipn-bus?mask=2 HTTP/1.0\r\n\
+          Host: local-tailscaled.sock\r\n\
+          Connection: close\r\n\r\n",
+    )?;
+    let mut reader = BufReader::new(stream);
+
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line)?;
+    if !status_line.contains(" 200 ") {
+        return Err(std::io::Error::other(format!(
+            "watch-ipn-bus: {}",
+            status_line.trim()
+        )));
+    }
+    // skip response headers
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
             break;
         }
     }
+    Ok(reader)
 }
