@@ -44,14 +44,6 @@ struct ExitInfo {
     online: bool,
 }
 
-fn country_flag_emoji(cc: &str) -> String {
-    cc.to_uppercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .map(|c| char::from_u32(0x1F1E6 + (c as u32 - 'A' as u32)).unwrap())
-        .collect()
-}
-
 /// Parse TAILFLAG_LOCATIONS ("host=cc,host2=cc2") into a lookup map.
 fn location_overrides() -> HashMap<String, String> {
     std::env::var("TAILFLAG_LOCATIONS")
@@ -211,6 +203,7 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
     if cc.len() != 2 || !cc.chars().all(|c| c.is_ascii_lowercase()) {
         return None;
     }
+    let radius_fraction = corner_radius_fraction();
     ICON_SIZES
         .iter()
         .map(|size| {
@@ -230,7 +223,7 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
                 .chunks_exact(4)
                 .flat_map(|p| [p[3], p[0], p[1], p[2]])
                 .collect();
-            round_corners(&mut data, info.width, info.height);
+            round_corners(&mut data, info.width, info.height, radius_fraction);
             Some(Icon {
                 width: info.width as i32,
                 height: info.height as i32,
@@ -240,15 +233,26 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
         .collect()
 }
 
-/// Corner radius of flag icons, as a fraction of the icon size.
-/// 0.5 turns the square flags into circles.
-const FLAG_CORNER_RADIUS: f32 = 0.5;
+/// Flag border style from TAILFLAG_STYLE, as a corner-radius fraction of
+/// the icon size: "square" (0.0), "rounded" (0.25), "circle" (0.5, the
+/// default), or a bare fraction like "0.35".
+fn corner_radius_fraction() -> f32 {
+    match std::env::var("TAILFLAG_STYLE").as_deref() {
+        Ok("square") => 0.0,
+        Ok("rounded") => 0.25,
+        Err(_) | Ok("circle") => 0.5,
+        Ok(other) => other.parse().map(|f: f32| f.clamp(0.0, 0.5)).unwrap_or(0.5),
+    }
+}
 
 /// Soften the square flags: multiply alpha by an antialiased
 /// rounded-rectangle coverage mask (signed-distance based).
-fn round_corners(argb: &mut [u8], width: u32, height: u32) {
+fn round_corners(argb: &mut [u8], width: u32, height: u32, radius_fraction: f32) {
+    if radius_fraction <= 0.0 {
+        return;
+    }
     let (w, h) = (width as f32, height as f32);
-    let r = w.min(h) * FLAG_CORNER_RADIUS;
+    let r = w.min(h) * radius_fraction;
     // half-extents of the inner rect whose corners the radius wraps
     let (bx, by) = (w / 2.0 - r, h / 2.0 - r);
     for y in 0..height {
@@ -312,32 +316,18 @@ impl Tailflag {
         self.set_state(state);
     }
 
+    /// Short human line for the current state: state text, or just the
+    /// exit node's hostname (no flag emoji / IP noise).
     fn status_line(&self) -> String {
         match &self.state {
             State::Stopped(why) => why.clone(),
             State::NoExit => "no exit node — routing directly".into(),
             State::Exit(info) => {
-                let mut parts = vec![info.host.clone()];
-                let loc = [info.city.as_deref(), info.country.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if !loc.is_empty() {
-                    parts.push(loc);
-                }
-                if let Some(ip) = &info.ip {
-                    parts.push(ip.clone());
-                }
+                let mut line = info.host.clone();
                 if !info.online {
-                    parts.push("OFFLINE".into());
+                    line.push_str(" — OFFLINE");
                 }
-                let flag = info
-                    .country
-                    .as_deref()
-                    .map(country_flag_emoji)
-                    .unwrap_or_default();
-                format!("{flag} {}", parts.join(" — ")).trim().to_string()
+                line
             }
         }
     }
@@ -359,56 +349,40 @@ impl Tray for Tailflag {
     }
 
     fn tool_tip(&self) -> ToolTip {
+        // Tooltip carries the location detail the icon can't
+        let description = match &self.state {
+            State::Exit(info) => {
+                let loc = [info.city.as_deref(), info.country.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if loc.is_empty() {
+                    self.status_line()
+                } else {
+                    format!("{} — {loc}", self.status_line())
+                }
+            }
+            _ => self.status_line(),
+        };
         ToolTip {
             title: match &self.state {
                 State::Stopped(_) => "Tailscale: not running".into(),
                 State::NoExit => "Tailscale: no exit node".into(),
                 State::Exit(_) => "Tailscale exit node".into(),
             },
-            description: self.status_line(),
+            description,
             ..Default::default()
         }
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let mut items: Vec<MenuItem<Self>> = vec![StandardItem {
+        vec![StandardItem {
             label: self.status_line(),
             enabled: false,
             ..Default::default()
         }
-        .into()];
-        if matches!(self.state, State::Exit(_)) {
-            items.push(
-                StandardItem {
-                    label: "Disable exit node".into(),
-                    activate: Box::new(|tray: &mut Self| {
-                        let res = Command::new("tailscale")
-                            .args(["set", "--exit-node="])
-                            .output();
-                        match res {
-                            Ok(o) if !o.status.success() => eprintln!(
-                                "tailscale set --exit-node= failed: {}",
-                                String::from_utf8_lossy(&o.stderr).trim()
-                            ),
-                            Err(e) => eprintln!("tailscale set failed: {e}"),
-                            _ => {}
-                        }
-                        tray.refresh();
-                    }),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        items.push(
-            StandardItem {
-                label: "Refresh".into(),
-                activate: Box::new(|tray: &mut Self| tray.refresh()),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items
+        .into()]
     }
 }
 

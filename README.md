@@ -10,10 +10,12 @@ status — with the exit node's country flag when one is active.
 | exit node active, country known | that country's flag |
 | exit node active, country unknown | dot grid with green bottom row |
 
-The tooltip and menu show the exit node's hostname, city/country, IP and
-online state. The menu also offers **Disable exit node** (needs Tailscale
-[operator](https://tailscale.com/kb/1080/cli#using-tailscale-without-sudo)
-permission) and **Refresh**.
+The menu shows just the exit node's hostname; the tooltip adds
+city/country and online state.
+
+Flags are drawn as circles by default; set `TAILFLAG_STYLE` to `square`,
+`rounded`, `circle`, or a corner-radius fraction (`0`–`0.5`) to change
+the border style.
 
 Works with any SNI-capable tray host (COSMIC status area applet, KDE,
 waybar, GNOME appindicator extension, …).
@@ -43,6 +45,7 @@ Debugging:
 ```bash
 tailflag --status            # print the resolved state and flag lookup
 TAILFLAG_DEMO=jp tailflag    # force a state: <cc> | none | stopped | unknown
+TAILFLAG_STYLE=rounded tailflag  # border style: square | rounded | circle | 0..0.5
 ```
 
 ### NixOS + home-manager
