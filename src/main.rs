@@ -226,10 +226,11 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
             if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
                 return None;
             }
-            let data = buf[..info.buffer_size()]
+            let mut data: Vec<u8> = buf[..info.buffer_size()]
                 .chunks_exact(4)
                 .flat_map(|p| [p[3], p[0], p[1], p[2]])
                 .collect();
+            round_corners(&mut data, info.width, info.height);
             Some(Icon {
                 width: info.width as i32,
                 height: info.height as i32,
@@ -237,6 +238,30 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
             })
         })
         .collect()
+}
+
+/// Corner radius of flag icons, as a fraction of the icon size.
+const FLAG_CORNER_RADIUS: f32 = 0.25;
+
+/// Soften the square flags: multiply alpha by an antialiased
+/// rounded-rectangle coverage mask (signed-distance based).
+fn round_corners(argb: &mut [u8], width: u32, height: u32) {
+    let (w, h) = (width as f32, height as f32);
+    let r = w.min(h) * FLAG_CORNER_RADIUS;
+    // half-extents of the inner rect whose corners the radius wraps
+    let (bx, by) = (w / 2.0 - r, h / 2.0 - r);
+    for y in 0..height {
+        for x in 0..width {
+            let dx = ((x as f32 + 0.5 - w / 2.0).abs() - bx).max(0.0);
+            let dy = ((y as f32 + 0.5 - h / 2.0).abs() - by).max(0.0);
+            let sdf = (dx * dx + dy * dy).sqrt() - r;
+            let cov = (0.5 - sdf).clamp(0.0, 1.0);
+            if cov < 1.0 {
+                let px = ((y * width + x) * 4) as usize;
+                argb[px] = (argb[px] as f32 * cov) as u8;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
