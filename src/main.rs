@@ -241,7 +241,8 @@ fn load_flag_icons(cc: &str) -> Option<Vec<Icon>> {
 }
 
 /// Corner radius of flag icons, as a fraction of the icon size.
-const FLAG_CORNER_RADIUS: f32 = 0.25;
+/// 0.5 turns the square flags into circles.
+const FLAG_CORNER_RADIUS: f32 = 0.5;
 
 /// Soften the square flags: multiply alpha by an antialiased
 /// rounded-rectangle coverage mask (signed-distance based).
