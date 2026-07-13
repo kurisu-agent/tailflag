@@ -7,6 +7,7 @@ status — with the exit node's country flag when one is active.
 |---|---|
 | tailscale stopped / logged out | dim 3×3 dot grid |
 | broken: no `tailscale` binary, daemon unreachable | dot grid with red bottom row |
+| running but network unreachable (tailscaled health) | dot grid with orange bottom row |
 | running, no exit node | dot grid with bright bottom row |
 | exit node active, country known | that country's flag |
 | exit node active, country unknown | dot grid with green bottom row |

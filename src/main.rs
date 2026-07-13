@@ -205,6 +205,7 @@ const DIM: [u8; 3] = [0x9a, 0x9a, 0x9a];
 const BRIGHT: [u8; 3] = [0xff, 0xff, 0xff];
 const GREEN: [u8; 3] = [0x4c, 0xd9, 0x64];
 const RED: [u8; 3] = [0xe5, 0x48, 0x4d];
+const ORANGE: [u8; 3] = [0xf5, 0xa6, 0x23];
 
 fn unknown_exit_icons() -> Vec<Icon> {
     ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, GREEN)).collect()
@@ -288,6 +289,9 @@ fn round_corners(argb: &mut [u8], width: u32, height: u32, radius_fraction: f32)
 
 struct Tailflag {
     state: State,
+    /// Tailscaled health says connectivity is broken (from IPN bus
+    /// health notifications; any warning with ImpactsConnectivity).
+    net_offline: bool,
     icons: Vec<Icon>,
     overrides: HashMap<String, String>,
     flag_cache: HashMap<String, Option<Vec<Icon>>>,
@@ -297,6 +301,7 @@ impl Tailflag {
     fn new(overrides: HashMap<String, String>) -> Self {
         let mut tray = Tailflag {
             state: State::Stopped("starting".into()),
+            net_offline: std::env::var("TAILFLAG_DEMO_OFFLINE").is_ok(),
             icons: Vec::new(),
             overrides,
             flag_cache: HashMap::new(),
@@ -306,22 +311,33 @@ impl Tailflag {
     }
 
     fn set_state(&mut self, state: State) {
-        self.icons = match &state {
-            State::Stopped(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, DIM)).collect(),
-            State::Error(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, RED)).collect(),
-            State::NoExit => ICON_SIZES
+        // A dead network trumps the flag: traffic is going nowhere, so
+        // don't advertise a working exit node. Stopped/Error already
+        // communicate their own problem.
+        let net_down = self.net_offline && matches!(state, State::NoExit | State::Exit(_));
+        self.icons = if net_down {
+            ICON_SIZES
                 .iter()
-                .map(|&s| grid_icon(s, DIM, BRIGHT))
-                .collect(),
-            State::Exit(info) => match &info.country {
-                Some(cc) => self
-                    .flag_cache
-                    .entry(cc.clone())
-                    .or_insert_with(|| load_flag_icons(cc))
-                    .clone()
-                    .unwrap_or_else(unknown_exit_icons),
-                None => unknown_exit_icons(),
-            },
+                .map(|&s| grid_icon(s, DIM, ORANGE))
+                .collect()
+        } else {
+            match &state {
+                State::Stopped(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, DIM)).collect(),
+                State::Error(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, RED)).collect(),
+                State::NoExit => ICON_SIZES
+                    .iter()
+                    .map(|&s| grid_icon(s, DIM, BRIGHT))
+                    .collect(),
+                State::Exit(info) => match &info.country {
+                    Some(cc) => self
+                        .flag_cache
+                        .entry(cc.clone())
+                        .or_insert_with(|| load_flag_icons(cc))
+                        .clone()
+                        .unwrap_or_else(unknown_exit_icons),
+                    None => unknown_exit_icons(),
+                },
+            }
         };
         self.state = state;
     }
@@ -333,6 +349,9 @@ impl Tailflag {
 
     /// Headline for the current state, e.g. "Tailscale Exit Node Connected".
     fn headline(&self) -> String {
+        if self.net_offline && matches!(self.state, State::NoExit | State::Exit(_)) {
+            return "Tailscale Network Down".into();
+        }
         match &self.state {
             State::Stopped(_) => "Tailscale Stopped".into(),
             State::Error(_) => "Tailscale Error".into(),
@@ -451,8 +470,15 @@ fn main() {
                 for line in events.lines() {
                     match line {
                         Ok(l) if l.trim().is_empty() => {}
-                        Ok(_) => {
-                            if handle.update(Tailflag::refresh).is_none() {
+                        Ok(l) => {
+                            let offline = health_offline(&l);
+                            let alive = handle.update(|t: &mut Tailflag| {
+                                if let Some(off) = offline {
+                                    t.net_offline = off;
+                                }
+                                t.refresh();
+                            });
+                            if alive.is_none() {
                                 return;
                             }
                         }
@@ -480,14 +506,16 @@ fn main() {
 /// yields one JSON notification per line for as long as the daemon runs;
 /// we only use the arrival of a line as a "state may have changed" signal.
 ///
-/// HTTP/1.0 keeps the response un-chunked; mask=2 (NotifyInitialState)
-/// makes the daemon confirm the subscription immediately.
+/// HTTP/1.0 keeps the response un-chunked; mask=130 is NotifyInitialState
+/// (2, confirms the subscription immediately) + NotifyInitialHealthState
+/// (128, current health warnings arrive at connect, so a start while the
+/// network is already down still shows the badge).
 fn watch_ipn_bus() -> std::io::Result<BufReader<UnixStream>> {
     let socket =
         std::env::var("TAILFLAG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
     let mut stream = UnixStream::connect(socket)?;
     stream.write_all(
-        b"GET /localapi/v0/watch-ipn-bus?mask=2 HTTP/1.0\r\n\
+        b"GET /localapi/v0/watch-ipn-bus?mask=130 HTTP/1.0\r\n\
           Host: local-tailscaled.sock\r\n\
           Connection: close\r\n\r\n",
     )?;
@@ -509,4 +537,22 @@ fn watch_ipn_bus() -> std::io::Result<BufReader<UnixStream>> {
         }
     }
     Ok(reader)
+}
+
+/// If an IPN notification carries a health snapshot, report whether any
+/// current warning impacts connectivity (network down, DERP unreachable,
+/// map poll dead, …). None when the notification isn't about health.
+/// Health notifies carry the complete warning set, not a delta.
+fn health_offline(notify_json: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(notify_json).ok()?;
+    let health = v.get("Health")?;
+    if health.is_null() {
+        return None;
+    }
+    let offline = health["Warnings"].as_object().is_some_and(|warnings| {
+        warnings
+            .values()
+            .any(|w| w["ImpactsConnectivity"].as_bool() == Some(true))
+    });
+    Some(offline)
 }
