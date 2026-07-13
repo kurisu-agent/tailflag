@@ -36,8 +36,11 @@ const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 #[derive(Clone, Debug, PartialEq)]
 enum State {
-    /// Daemon unreachable, stopped, or logged out.
+    /// Tailscale is present but deliberately not up (stopped, logged out).
     Stopped(String),
+    /// Something is broken: no `tailscale` binary, daemon unreachable,
+    /// or unparseable status output.
+    Error(String),
     /// Running with no exit node configured.
     NoExit,
     /// Running with an exit node configured.
@@ -74,16 +77,16 @@ fn poll_state(overrides: &HashMap<String, String>) -> State {
     let out = match Command::new("tailscale").args(["status", "--json"]).output() {
         Ok(o) if o.status.success() => o.stdout,
         Ok(o) => {
-            return State::Stopped(format!(
+            return State::Error(format!(
                 "tailscale status failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             ))
         }
-        Err(e) => return State::Stopped(format!("tailscale not available: {e}")),
+        Err(e) => return State::Error(format!("tailscale not available: {e}")),
     };
     let status: serde_json::Value = match serde_json::from_slice(&out) {
         Ok(v) => v,
-        Err(e) => return State::Stopped(format!("bad status JSON: {e}")),
+        Err(e) => return State::Error(format!("bad status JSON: {e}")),
     };
 
     let backend = status["BackendState"].as_str().unwrap_or("");
@@ -151,6 +154,7 @@ fn mullvad_country(dns_name: &str) -> Option<String> {
 fn demo_state(demo: &str) -> State {
     match demo {
         "stopped" => State::Stopped("tailscale is stopped".into()),
+        "error" => State::Error("demo error".into()),
         "none" => State::NoExit,
         cc => State::Exit(ExitInfo {
             host: format!("demo-{cc}"),
@@ -200,6 +204,7 @@ fn grid_icon(size: u32, dim: [u8; 3], bottom: [u8; 3]) -> Icon {
 const DIM: [u8; 3] = [0x9a, 0x9a, 0x9a];
 const BRIGHT: [u8; 3] = [0xff, 0xff, 0xff];
 const GREEN: [u8; 3] = [0x4c, 0xd9, 0x64];
+const RED: [u8; 3] = [0xe5, 0x48, 0x4d];
 
 fn unknown_exit_icons() -> Vec<Icon> {
     ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, GREEN)).collect()
@@ -303,6 +308,7 @@ impl Tailflag {
     fn set_state(&mut self, state: State) {
         self.icons = match &state {
             State::Stopped(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, DIM)).collect(),
+            State::Error(_) => ICON_SIZES.iter().map(|&s| grid_icon(s, DIM, RED)).collect(),
             State::NoExit => ICON_SIZES
                 .iter()
                 .map(|&s| grid_icon(s, DIM, BRIGHT))
@@ -329,7 +335,7 @@ impl Tailflag {
     /// exit node's hostname (no flag emoji / IP noise).
     fn status_line(&self) -> String {
         match &self.state {
-            State::Stopped(why) => why.clone(),
+            State::Stopped(why) | State::Error(why) => why.clone(),
             State::NoExit => "no exit node — routing directly".into(),
             State::Exit(info) => {
                 let mut line = info.host.clone();
@@ -377,6 +383,7 @@ impl Tray for Tailflag {
         ToolTip {
             title: match &self.state {
                 State::Stopped(_) => "Tailscale: not running".into(),
+                State::Error(_) => "Tailscale: error".into(),
                 State::NoExit => "Tailscale: no exit node".into(),
                 State::Exit(_) => "Tailscale exit node".into(),
             },

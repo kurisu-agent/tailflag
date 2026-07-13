@@ -5,7 +5,8 @@ status — with the exit node's country flag when one is active.
 
 | State | Icon |
 |---|---|
-| tailscale stopped / logged out / unreachable | dim 3×3 dot grid |
+| tailscale stopped / logged out | dim 3×3 dot grid |
+| broken: no `tailscale` binary, daemon unreachable | dot grid with red bottom row |
 | running, no exit node | dot grid with bright bottom row |
 | exit node active, country known | that country's flag |
 | exit node active, country unknown | dot grid with green bottom row |
@@ -49,7 +50,7 @@ Debugging:
 
 ```bash
 tailflag --status            # print the resolved state and flag lookup
-TAILFLAG_DEMO=jp tailflag    # force a state: <cc> | none | stopped | unknown
+TAILFLAG_DEMO=jp tailflag    # force a state: <cc> | none | stopped | error | unknown
 TAILFLAG_STYLE=rounded tailflag  # border style: square | rounded | circle | 0..0.5
 ```
 
