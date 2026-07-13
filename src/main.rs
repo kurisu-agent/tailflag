@@ -331,18 +331,38 @@ impl Tailflag {
         self.set_state(state);
     }
 
-    /// Short human line for the current state: state text, or just the
-    /// exit node's hostname (no flag emoji / IP noise).
-    fn status_line(&self) -> String {
+    /// Headline for the current state, e.g. "Tailscale Exit Node Connected".
+    fn headline(&self) -> String {
+        match &self.state {
+            State::Stopped(_) => "Tailscale Stopped".into(),
+            State::Error(_) => "Tailscale Error".into(),
+            State::NoExit => "Tailscale Connected — No Exit Node".into(),
+            State::Exit(info) if info.online => "Tailscale Exit Node Connected".into(),
+            State::Exit(_) => "Tailscale Exit Node OFFLINE".into(),
+        }
+    }
+
+    /// Detail line: "Amsterdam, NL — nl-ams-wg-001" for an exit node (location
+    /// first, hostname after; hostname alone if no location), or the
+    /// state's explanatory text.
+    fn detail(&self) -> String {
         match &self.state {
             State::Stopped(why) | State::Error(why) => why.clone(),
-            State::NoExit => "no exit node — routing directly".into(),
+            State::NoExit => "traffic routes directly".into(),
             State::Exit(info) => {
-                let mut line = info.host.clone();
-                if !info.online {
-                    line.push_str(" — OFFLINE");
+                let loc = [
+                    info.city.clone(),
+                    info.country.as_deref().map(str::to_uppercase),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                if loc.is_empty() {
+                    info.host.clone()
+                } else {
+                    format!("{loc} — {}", info.host)
                 }
-                line
             }
         }
     }
@@ -356,7 +376,7 @@ impl Tray for Tailflag {
     }
 
     fn title(&self) -> String {
-        "Tailscale exit node".into()
+        self.headline()
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
@@ -364,41 +384,25 @@ impl Tray for Tailflag {
     }
 
     fn tool_tip(&self) -> ToolTip {
-        // Tooltip carries the location detail the icon can't
-        let description = match &self.state {
-            State::Exit(info) => {
-                let loc = [info.city.as_deref(), info.country.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if loc.is_empty() {
-                    self.status_line()
-                } else {
-                    format!("{} — {loc}", self.status_line())
-                }
-            }
-            _ => self.status_line(),
-        };
         ToolTip {
-            title: match &self.state {
-                State::Stopped(_) => "Tailscale: not running".into(),
-                State::Error(_) => "Tailscale: error".into(),
-                State::NoExit => "Tailscale: no exit node".into(),
-                State::Exit(_) => "Tailscale exit node".into(),
-            },
-            description,
+            title: self.headline(),
+            description: self.detail(),
             ..Default::default()
         }
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        vec![StandardItem {
-            label: self.status_line(),
-            enabled: false,
-            ..Default::default()
-        }
-        .into()]
+        [self.headline(), self.detail()]
+            .into_iter()
+            .map(|label| {
+                StandardItem {
+                    label,
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect()
     }
 }
 
